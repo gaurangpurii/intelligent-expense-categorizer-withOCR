@@ -1,104 +1,187 @@
-import { MongoClient } from 'mongodb'
-import { v4 as uuidv4 } from 'uuid'
 import { NextResponse } from 'next/server'
+import bcrypt from 'bcryptjs'
+import { v4 as uuid } from 'uuid'
+import { getDb } from '@/lib/mongodb'
+import {
+  signSession, verifySession, setSessionCookie, clearSessionCookie,
+} from '@/lib/auth'
 
-// MongoDB connection
-let client
-let db
+function json(data, init = {}) {
+  return NextResponse.json(data, init)
+}
 
-async function connectToMongo() {
-  if (!client) {
-    client = new MongoClient(process.env.MONGO_URL)
-    await client.connect()
-    db = client.db(process.env.DB_NAME)
+async function userFromReq(req) {
+  const token = req.cookies.get('sec_session')?.value
+  return await verifySession(token)
+}
+
+function routeOf(params) {
+  const p = params?.path || []
+  return p.join('/')
+}
+
+// ----- AUTH -----
+async function handleAuth(req, route) {
+  const db = await getDb()
+  const users = db.collection('users')
+
+  if (route === 'auth/signup' && req.method === 'POST') {
+    const { email, password, name } = await req.json()
+    if (!email || !password) return json({ error: 'Email and password required' }, { status: 400 })
+    const e = String(email).trim().toLowerCase()
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e)) return json({ error: 'Invalid email' }, { status: 400 })
+    if (String(password).length < 6) return json({ error: 'Password must be 6+ chars' }, { status: 400 })
+
+    const exists = await users.findOne({ email: e })
+    if (exists) return json({ error: 'Account already exists. Please sign in.' }, { status: 409 })
+
+    const hash = await bcrypt.hash(password, 10)
+    const user = {
+      id: uuid(),
+      email: e,
+      name: name || e.split('@')[0],
+      passwordHash: hash,
+      createdAt: new Date().toISOString(),
+    }
+    await users.insertOne(user)
+    const token = await signSession({ uid: user.id, email: user.email, name: user.name })
+    const res = json({ user: { id: user.id, email: user.email, name: user.name } })
+    return setSessionCookie(res, token)
   }
-  return db
+
+  if (route === 'auth/login' && req.method === 'POST') {
+    const { email, password } = await req.json()
+    if (!email || !password) return json({ error: 'Email and password required' }, { status: 400 })
+    const e = String(email).trim().toLowerCase()
+    const user = await users.findOne({ email: e })
+    if (!user) return json({ error: 'Invalid credentials' }, { status: 401 })
+    const ok = await bcrypt.compare(password, user.passwordHash)
+    if (!ok) return json({ error: 'Invalid credentials' }, { status: 401 })
+    const token = await signSession({ uid: user.id, email: user.email, name: user.name })
+    const res = json({ user: { id: user.id, email: user.email, name: user.name } })
+    return setSessionCookie(res, token)
+  }
+
+  if (route === 'auth/logout' && req.method === 'POST') {
+    const res = json({ ok: true })
+    return clearSessionCookie(res)
+  }
+
+  if (route === 'auth/me' && req.method === 'GET') {
+    const u = await userFromReq(req)
+    if (!u) return json({ user: null })
+    return json({ user: { id: u.uid, email: u.email, name: u.name } })
+  }
+
+  return null
 }
 
-// Helper function to handle CORS
-function handleCORS(response) {
-  response.headers.set('Access-Control-Allow-Origin', process.env.CORS_ORIGINS || '*')
-  response.headers.set('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS')
-  response.headers.set('Access-Control-Allow-Headers', 'Content-Type, Authorization')
-  response.headers.set('Access-Control-Allow-Credentials', 'true')
-  return response
+// ----- EXPENSES -----
+async function handleExpenses(req, route) {
+  const u = await userFromReq(req)
+  if (!u) return json({ error: 'Unauthorized' }, { status: 401 })
+
+  const db = await getDb()
+  const col = db.collection('expenses')
+
+  // GET /api/expenses
+  if (route === 'expenses' && req.method === 'GET') {
+    const list = await col
+      .find({ userId: u.uid }, { projection: { _id: 0 } })
+      .sort({ date: -1 })
+      .toArray()
+    return json({ expenses: list })
+  }
+
+  // POST /api/expenses  -> single insert
+  if (route === 'expenses' && req.method === 'POST') {
+    const body = await req.json()
+    const e = sanitizeExpense(body, u.uid)
+    await col.insertOne(e)
+    const { _id, ...rest } = e
+    return json({ expense: rest })
+  }
+
+  // POST /api/expenses/bulk -> import many
+  if (route === 'expenses/bulk' && req.method === 'POST') {
+    const { expenses } = await req.json()
+    if (!Array.isArray(expenses) || expenses.length === 0) {
+      return json({ inserted: 0 })
+    }
+    const docs = expenses.map((x) => sanitizeExpense(x, u.uid))
+    await col.insertMany(docs)
+    return json({ inserted: docs.length })
+  }
+
+  // PUT /api/expenses/:id
+  if (route.startsWith('expenses/') && req.method === 'PUT') {
+    const id = route.split('/')[1]
+    const body = await req.json()
+    const update = {
+      merchant: String(body.merchant || ''),
+      amount: Number(body.amount) || 0,
+      date: String(body.date || ''),
+      category: String(body.category || 'Other'),
+      confidence: Number(body.confidence) || 0,
+    }
+    await col.updateOne({ id, userId: u.uid }, { $set: update })
+    return json({ ok: true })
+  }
+
+  // DELETE /api/expenses/:id
+  if (route.startsWith('expenses/') && req.method === 'DELETE') {
+    const id = route.split('/')[1]
+    await col.deleteOne({ id, userId: u.uid })
+    return json({ ok: true })
+  }
+
+  // DELETE /api/expenses (clear all)
+  if (route === 'expenses' && req.method === 'DELETE') {
+    const r = await col.deleteMany({ userId: u.uid })
+    return json({ deleted: r.deletedCount })
+  }
+
+  return null
 }
 
-// OPTIONS handler for CORS
-export async function OPTIONS() {
-  return handleCORS(new NextResponse(null, { status: 200 }))
+function sanitizeExpense(body, userId) {
+  return {
+    id: body.id || uuid(),
+    userId,
+    merchant: String(body.merchant || 'Unknown'),
+    amount: Number(body.amount) || 0,
+    date: String(body.date || new Date().toISOString().slice(0, 10)),
+    category: String(body.category || 'Other'),
+    confidence: Number(body.confidence) || 0,
+    ocrConfidence: Number(body.ocrConfidence) || 0,
+    imageUrl: '',
+    createdAt: body.createdAt || new Date().toISOString(),
+  }
 }
 
-// Route handler function
-async function handleRoute(request, { params }) {
-  const { path = [] } = params
-  const route = `/${path.join('/')}`
-  const method = request.method
-
+// ----- ROUTER -----
+async function dispatch(req, { params }) {
+  const route = routeOf(params)
   try {
-    const db = await connectToMongo()
-
-    // Root endpoint - GET /api/root (since /api/ is not accessible with catch-all)
-    if (route === '/root' && method === 'GET') {
-      return handleCORS(NextResponse.json({ message: "Hello World" }))
+    if (route.startsWith('auth/')) {
+      const r = await handleAuth(req, route)
+      if (r) return r
     }
-    // Root endpoint - GET /api/root (since /api/ is not accessible with catch-all)
-    if (route === '/' && method === 'GET') {
-      return handleCORS(NextResponse.json({ message: "Hello World" }))
+    if (route === 'expenses' || route.startsWith('expenses/')) {
+      const r = await handleExpenses(req, route)
+      if (r) return r
     }
-
-    // Status endpoints - POST /api/status
-    if (route === '/status' && method === 'POST') {
-      const body = await request.json()
-      
-      if (!body.client_name) {
-        return handleCORS(NextResponse.json(
-          { error: "client_name is required" }, 
-          { status: 400 }
-        ))
-      }
-
-      const statusObj = {
-        id: uuidv4(),
-        client_name: body.client_name,
-        timestamp: new Date()
-      }
-
-      await db.collection('status_checks').insertOne(statusObj)
-      return handleCORS(NextResponse.json(statusObj))
+    if (route === '' || route === '/') {
+      return json({ ok: true, name: 'Smart Expense Categorizer API' })
     }
-
-    // Status endpoints - GET /api/status
-    if (route === '/status' && method === 'GET') {
-      const statusChecks = await db.collection('status_checks')
-        .find({})
-        .limit(1000)
-        .toArray()
-
-      // Remove MongoDB's _id field from response
-      const cleanedStatusChecks = statusChecks.map(({ _id, ...rest }) => rest)
-      
-      return handleCORS(NextResponse.json(cleanedStatusChecks))
-    }
-
-    // Route not found
-    return handleCORS(NextResponse.json(
-      { error: `Route ${route} not found` }, 
-      { status: 404 }
-    ))
-
-  } catch (error) {
-    console.error('API Error:', error)
-    return handleCORS(NextResponse.json(
-      { error: "Internal server error" }, 
-      { status: 500 }
-    ))
+    return json({ error: 'Not found', route }, { status: 404 })
+  } catch (e) {
+    console.error('API error', e)
+    return json({ error: e.message || 'Server error' }, { status: 500 })
   }
 }
 
-// Export all HTTP methods
-export const GET = handleRoute
-export const POST = handleRoute
-export const PUT = handleRoute
-export const DELETE = handleRoute
-export const PATCH = handleRoute
+export async function GET(req, ctx) { return dispatch(req, ctx) }
+export async function POST(req, ctx) { return dispatch(req, ctx) }
+export async function PUT(req, ctx) { return dispatch(req, ctx) }
+export async function DELETE(req, ctx) { return dispatch(req, ctx) }

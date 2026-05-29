@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState, useCallback } from 'react'
 import { v4 as uuid } from 'uuid'
 import {
   PieChart, Pie, Cell, Tooltip, ResponsiveContainer,
@@ -10,7 +10,8 @@ import {
 import {
   Upload, ScanLine, Sparkles, Receipt, Wallet, TrendingUp, Flame,
   Search, Download, Trash2, Pencil, Calendar, Store, PieChart as PieIcon,
-  Loader2, X, Check, BarChart3, Layers, Plus,
+  Loader2, X, Check, BarChart3, Layers, Plus, LogOut, Mail, Lock, User,
+  ArrowRight, Database, ShieldCheck,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card'
@@ -24,33 +25,209 @@ import {
 import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter,
 } from '@/components/ui/dialog'
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { toast, Toaster } from 'sonner'
 import {
-  CATEGORIES, CATEGORY_LIST, categorize, parseReceipt, generateInsights,
+  CATEGORIES, CATEGORY_LIST, categorize, parseReceipt, generateInsights, preprocessImage,
 } from '@/lib/utils/categorize'
 
-const STORAGE_KEY = 'sec_expenses_v1'
+const LEGACY_KEY = 'sec_expenses_v1' // previous (pre-auth) localStorage data
 
 const formatINR = (n) =>
   new Intl.NumberFormat('en-IN', { maximumFractionDigits: 0 }).format(Number(n || 0))
 
-function loadExpenses() {
-  if (typeof window === 'undefined') return []
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY)
-    return raw ? JSON.parse(raw) : []
-  } catch (e) {
-    return []
+const api = {
+  async me() {
+    const r = await fetch('/api/auth/me', { credentials: 'include' })
+    return r.json()
+  },
+  async login(email, password) {
+    const r = await fetch('/api/auth/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify({ email, password }),
+    })
+    return { ok: r.ok, ...(await r.json()) }
+  },
+  async signup(email, password, name) {
+    const r = await fetch('/api/auth/signup', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify({ email, password, name }),
+    })
+    return { ok: r.ok, ...(await r.json()) }
+  },
+  async logout() {
+    await fetch('/api/auth/logout', { method: 'POST', credentials: 'include' })
+  },
+  async listExpenses() {
+    const r = await fetch('/api/expenses', { credentials: 'include' })
+    const j = await r.json()
+    return j.expenses || []
+  },
+  async addExpense(exp) {
+    const r = await fetch('/api/expenses', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify(exp),
+    })
+    const j = await r.json()
+    return j.expense
+  },
+  async bulkInsert(list) {
+    const r = await fetch('/api/expenses/bulk', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify({ expenses: list }),
+    })
+    return r.json()
+  },
+  async updateExpense(exp) {
+    await fetch(`/api/expenses/${exp.id}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify(exp),
+    })
+  },
+  async deleteExpense(id) {
+    await fetch(`/api/expenses/${id}`, { method: 'DELETE', credentials: 'include' })
+  },
+  async clearAll() {
+    await fetch('/api/expenses', { method: 'DELETE', credentials: 'include' })
+  },
+}
+
+// ===================== AUTH SCREEN =====================
+function AuthScreen({ onAuthed }) {
+  const [mode, setMode] = useState('login')
+  const [email, setEmail] = useState('')
+  const [password, setPassword] = useState('')
+  const [name, setName] = useState('')
+  const [busy, setBusy] = useState(false)
+
+  const submit = async () => {
+    if (!email || !password) return toast.error('Email & password required')
+    setBusy(true)
+    try {
+      const res = mode === 'login'
+        ? await api.login(email, password)
+        : await api.signup(email, password, name)
+      if (!res.ok) {
+        toast.error(res.error || 'Authentication failed')
+      } else {
+        toast.success(mode === 'login' ? 'Welcome back!' : 'Account created')
+        onAuthed(res.user)
+      }
+    } finally {
+      setBusy(false)
+    }
   }
+
+  return (
+    <div className="min-h-screen relative flex items-center justify-center p-4 bg-gradient-to-br from-background via-background to-muted/30">
+      <div className="pointer-events-none fixed inset-0 overflow-hidden -z-10">
+        <div className="absolute -top-32 -left-32 w-[420px] h-[420px] rounded-full bg-primary/15 blur-3xl" />
+        <div className="absolute bottom-0 -right-32 w-[420px] h-[420px] rounded-full bg-fuchsia-500/10 blur-3xl" />
+      </div>
+
+      <div className="w-full max-w-5xl grid lg:grid-cols-2 gap-8 items-center">
+        <div className="hidden lg:block">
+          <div className="flex items-center gap-3 mb-6">
+            <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-primary to-fuchsia-500 flex items-center justify-center shadow-lg shadow-primary/30">
+              <Wallet className="w-5 h-5 text-white" />
+            </div>
+            <div className="font-semibold text-xl tracking-tight">Smart Expense Categorizer</div>
+          </div>
+          <h1 className="text-4xl font-semibold tracking-tight leading-tight">
+            Your receipts, <span className="bg-gradient-to-r from-primary to-fuchsia-400 bg-clip-text text-transparent">organized in seconds</span>.
+          </h1>
+          <p className="text-muted-foreground mt-3 max-w-md">
+            Sign in to securely save your expenses to the cloud. Scan receipts, auto-categorize, and watch beautiful insights unfold &mdash; on every device.
+          </p>
+          <div className="mt-6 space-y-3">
+            <Feature icon={ScanLine} title="On-device OCR" desc="Tesseract.js extracts merchant, amount and date" />
+            <Feature icon={Sparkles} title="Smart categorization" desc="7 categories with merchant + keyword rules" />
+            <Feature icon={ShieldCheck} title="Private to your account" desc="Encrypted password, JWT session, cloud sync" />
+          </div>
+        </div>
+
+        <Card className="border-border/60 bg-card/70 backdrop-blur">
+          <CardHeader>
+            <CardTitle className="text-xl">{mode === 'login' ? 'Welcome back' : 'Create your account'}</CardTitle>
+            <CardDescription>
+              {mode === 'login' ? 'Sign in to continue managing your expenses.' : 'It takes a few seconds. No credit card.'}
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <Tabs value={mode} onValueChange={setMode}>
+              <TabsList className="grid grid-cols-2 w-full">
+                <TabsTrigger value="login">Sign in</TabsTrigger>
+                <TabsTrigger value="signup">Create account</TabsTrigger>
+              </TabsList>
+            </Tabs>
+
+            {mode === 'signup' && (
+              <div>
+                <Label className="text-xs">Name (optional)</Label>
+                <div className="relative">
+                  <User className="absolute left-2.5 top-2.5 w-4 h-4 text-muted-foreground" />
+                  <Input className="pl-8" placeholder="Your name" value={name} onChange={(e) => setName(e.target.value)} />
+                </div>
+              </div>
+            )}
+            <div>
+              <Label className="text-xs">Email</Label>
+              <div className="relative">
+                <Mail className="absolute left-2.5 top-2.5 w-4 h-4 text-muted-foreground" />
+                <Input className="pl-8" type="email" placeholder="you@example.com" value={email} onChange={(e) => setEmail(e.target.value)} />
+              </div>
+            </div>
+            <div>
+              <Label className="text-xs">Password</Label>
+              <div className="relative">
+                <Lock className="absolute left-2.5 top-2.5 w-4 h-4 text-muted-foreground" />
+                <Input className="pl-8" type="password" placeholder="At least 6 characters" value={password} onChange={(e) => setPassword(e.target.value)}
+                  onKeyDown={(e) => e.key === 'Enter' && submit()} />
+              </div>
+            </div>
+            <Button onClick={submit} disabled={busy} className="w-full gap-2">
+              {busy ? <Loader2 className="w-4 h-4 animate-spin" /> : <ArrowRight className="w-4 h-4" />}
+              {mode === 'login' ? 'Sign in' : 'Create account'}
+            </Button>
+            <p className="text-xs text-muted-foreground text-center">
+              {mode === 'login' ? "New here? " : 'Already have an account? '}
+              <button className="text-primary hover:underline" onClick={() => setMode(mode === 'login' ? 'signup' : 'login')}>
+                {mode === 'login' ? 'Create an account' : 'Sign in'}
+              </button>
+            </p>
+          </CardContent>
+        </Card>
+      </div>
+    </div>
+  )
 }
 
-function saveExpenses(list) {
-  if (typeof window === 'undefined') return
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(list))
+function Feature({ icon: Icon, title, desc }) {
+  return (
+    <div className="flex items-start gap-3">
+      <div className="w-8 h-8 rounded-lg bg-primary/15 text-primary flex items-center justify-center shrink-0">
+        <Icon className="w-4 h-4" />
+      </div>
+      <div>
+        <div className="text-sm font-medium">{title}</div>
+        <div className="text-xs text-muted-foreground">{desc}</div>
+      </div>
+    </div>
+  )
 }
 
-// ---------- Upload + OCR component ----------
+// ===================== RECEIPT UPLOADER =====================
 function ReceiptUploader({ onSave }) {
   const [file, setFile] = useState(null)
   const [imgUrl, setImgUrl] = useState('')
@@ -73,18 +250,14 @@ function ReceiptUploader({ onSave }) {
     setResult(null)
     setRawText('')
     setOcrConf(0)
-    const url = URL.createObjectURL(f)
-    setImgUrl(url)
+    if (imgUrl) URL.revokeObjectURL(imgUrl)
+    setImgUrl(URL.createObjectURL(f))
   }
 
   const reset = () => {
-    setFile(null)
-    setImgUrl('')
-    setResult(null)
-    setRawText('')
-    setOcrConf(0)
-    setProgress(0)
-    setStage('')
+    if (imgUrl) URL.revokeObjectURL(imgUrl)
+    setFile(null); setImgUrl(''); setResult(null); setRawText('')
+    setOcrConf(0); setProgress(0); setStage('')
   }
 
   const runOcr = async () => {
@@ -92,16 +265,24 @@ function ReceiptUploader({ onSave }) {
       toast.error('Upload a receipt first')
       return
     }
-    setScanning(true)
-    setProgress(0)
-    setStage('initializing')
+    setScanning(true); setProgress(0); setStage('preparing')
     try {
+      // Pre-process image (grayscale + contrast + threshold) for cleaner OCR
+      let input = file
+      try {
+        const dataUrl = await preprocessImage(file, 1500)
+        input = dataUrl
+      } catch (e) {
+        // fall back to raw file
+      }
       const Tesseract = (await import('tesseract.js')).default
-      const { data } = await Tesseract.recognize(file, 'eng', {
+      const { data } = await Tesseract.recognize(input, 'eng', {
         logger: (m) => {
           if (m.status) setStage(m.status)
           if (typeof m.progress === 'number') setProgress(Math.round(m.progress * 100))
         },
+        tessedit_pageseg_mode: 6,
+        preserve_interword_spaces: 1,
       })
       const text = data?.text || ''
       const conf = Math.round(data?.confidence || 0)
@@ -125,7 +306,7 @@ function ReceiptUploader({ onSave }) {
     }
   }
 
-  const handleSave = () => {
+  const handleSave = async () => {
     if (!result) return
     const exp = {
       id: uuid(),
@@ -135,11 +316,9 @@ function ReceiptUploader({ onSave }) {
       category: result.category,
       confidence: result.confidence,
       ocrConfidence: ocrConf,
-      imageUrl: imgUrl,
       createdAt: new Date().toISOString(),
     }
-    onSave(exp)
-    toast.success('Expense saved')
+    await onSave(exp)
     reset()
   }
 
@@ -147,10 +326,9 @@ function ReceiptUploader({ onSave }) {
     <Card className="border-border/60 bg-card/60 backdrop-blur">
       <CardHeader className="pb-3">
         <CardTitle className="flex items-center gap-2 text-base">
-          <ScanLine className="w-4 h-4 text-primary" />
-          Scan a receipt
+          <ScanLine className="w-4 h-4 text-primary" /> Scan a receipt
         </CardTitle>
-        <CardDescription>Drag &amp; drop or upload a JPG/PNG. We&apos;ll do the rest.</CardDescription>
+        <CardDescription>Drag &amp; drop or upload a JPG/PNG. We&apos;ll preprocess and read it.</CardDescription>
       </CardHeader>
       <CardContent className="space-y-4">
         {!imgUrl ? (
@@ -170,33 +348,23 @@ function ReceiptUploader({ onSave }) {
             </div>
             <p className="font-medium">Drop your receipt here</p>
             <p className="text-sm text-muted-foreground mt-1">or click to browse &mdash; JPG, JPEG, PNG</p>
-            <input
-              ref={inputRef}
-              type="file"
-              accept="image/png,image/jpeg,image/jpg"
-              hidden
-              onChange={(e) => onPick(e.target.files?.[0])}
-            />
+            <input ref={inputRef} type="file" accept="image/png,image/jpeg,image/jpg" hidden
+              onChange={(e) => onPick(e.target.files?.[0])} />
           </div>
         ) : (
           <div className="grid md:grid-cols-2 gap-4">
             <div className="relative group rounded-xl overflow-hidden border border-border bg-muted">
               {/* eslint-disable-next-line @next/next/no-img-element */}
               <img src={imgUrl} alt="receipt" className="w-full h-72 object-contain bg-black/30" />
-              <button
-                onClick={reset}
-                className="absolute top-2 right-2 p-1.5 rounded-full bg-background/80 hover:bg-background border border-border"
-                title="Remove"
-              >
+              <button onClick={reset}
+                className="absolute top-2 right-2 p-1.5 rounded-full bg-background/80 hover:bg-background border border-border" title="Remove">
                 <X className="w-4 h-4" />
               </button>
               {scanning && (
                 <div className="absolute inset-0 bg-background/70 backdrop-blur-sm flex flex-col items-center justify-center">
                   <Loader2 className="w-10 h-10 animate-spin text-primary" />
                   <p className="mt-3 text-sm capitalize">{stage || 'processing'}...</p>
-                  <div className="w-48 mt-2">
-                    <Progress value={progress} />
-                  </div>
+                  <div className="w-48 mt-2"><Progress value={progress} /></div>
                 </div>
               )}
             </div>
@@ -206,22 +374,14 @@ function ReceiptUploader({ onSave }) {
                 <div className="rounded-xl border border-dashed border-border p-4 h-72 flex flex-col items-center justify-center text-center">
                   <Sparkles className="w-7 h-7 text-primary mb-2" />
                   <p className="font-medium">Ready to analyze</p>
-                  <p className="text-sm text-muted-foreground mb-3">
-                    Extract merchant, amount, date and auto-categorize.
-                  </p>
+                  <p className="text-sm text-muted-foreground mb-3">Extract merchant, amount, date and auto-categorize.</p>
                   <Button onClick={runOcr} disabled={scanning} className="gap-2">
                     {scanning ? <Loader2 className="w-4 h-4 animate-spin" /> : <ScanLine className="w-4 h-4" />}
                     Analyze Receipt
                   </Button>
                 </div>
               ) : (
-                <ResultEditor
-                  result={result}
-                  setResult={setResult}
-                  ocrConf={ocrConf}
-                  onSave={handleSave}
-                  onCancel={reset}
-                />
+                <ResultEditor result={result} setResult={setResult} ocrConf={ocrConf} onSave={handleSave} onCancel={reset} />
               )}
             </div>
           </div>
@@ -258,27 +418,17 @@ function ResultEditor({ result, setResult, ocrConf, onSave, onCancel }) {
         </div>
         <div>
           <Label className="text-xs">Amount (₹)</Label>
-          <Input
-            type="number"
-            value={result.amount}
-            onChange={(e) => update('amount', e.target.value)}
-          />
+          <Input type="number" value={result.amount} onChange={(e) => update('amount', e.target.value)} />
         </div>
         <div>
           <Label className="text-xs">Date</Label>
-          <Input
-            type="date"
-            value={result.date}
-            onChange={(e) => update('date', e.target.value)}
-          />
+          <Input type="date" value={result.date} onChange={(e) => update('date', e.target.value)} />
         </div>
         <div className="col-span-2">
           <Label className="text-xs">Category</Label>
           <div className="flex items-center gap-2">
             <Select value={result.category} onValueChange={(v) => update('category', v)}>
-              <SelectTrigger>
-                <SelectValue />
-              </SelectTrigger>
+              <SelectTrigger><SelectValue /></SelectTrigger>
               <SelectContent>
                 {CATEGORY_LIST.map((c) => (
                   <SelectItem key={c} value={c}>
@@ -290,10 +440,7 @@ function ResultEditor({ result, setResult, ocrConf, onSave, onCancel }) {
                 ))}
               </SelectContent>
             </Select>
-            <Badge
-              className="border-0"
-              style={{ background: `${catColor}22`, color: catColor }}
-            >
+            <Badge className="border-0" style={{ background: `${catColor}22`, color: catColor }}>
               {result.confidence}% match
             </Badge>
           </div>
@@ -301,18 +448,14 @@ function ResultEditor({ result, setResult, ocrConf, onSave, onCancel }) {
       </div>
 
       <div className="flex justify-end gap-2 pt-1">
-        <Button variant="ghost" onClick={onCancel} className="gap-1">
-          <X className="w-4 h-4" /> Discard
-        </Button>
-        <Button onClick={onSave} className="gap-1">
-          <Check className="w-4 h-4" /> Save expense
-        </Button>
+        <Button variant="ghost" onClick={onCancel} className="gap-1"><X className="w-4 h-4" /> Discard</Button>
+        <Button onClick={onSave} className="gap-1"><Check className="w-4 h-4" /> Save expense</Button>
       </div>
     </div>
   )
 }
 
-// ---------- KPI ----------
+// ===================== UI HELPERS =====================
 function KpiCard({ icon: Icon, label, value, sub }) {
   return (
     <Card className="relative overflow-hidden border-border/60 bg-card/60 backdrop-blur">
@@ -331,7 +474,6 @@ function KpiCard({ icon: Icon, label, value, sub }) {
   )
 }
 
-// ---------- Dashboard charts ----------
 function CategoryPie({ data }) {
   if (!data.length) return <EmptyChart label="Add expenses to see distribution" />
   return (
@@ -340,10 +482,8 @@ function CategoryPie({ data }) {
         <Pie data={data} dataKey="value" nameKey="name" innerRadius={60} outerRadius={95} paddingAngle={3} stroke="none">
           {data.map((entry, i) => (<Cell key={i} fill={entry.color} />))}
         </Pie>
-        <Tooltip
-          contentStyle={{ background: 'hsl(var(--card))', border: '1px solid hsl(var(--border))', borderRadius: 8 }}
-          formatter={(v, n) => [`₹${formatINR(v)}`, n]}
-        />
+        <Tooltip contentStyle={{ background: 'hsl(var(--card))', border: '1px solid hsl(var(--border))', borderRadius: 8 }}
+          formatter={(v, n) => [`₹${formatINR(v)}`, n]} />
         <Legend wrapperStyle={{ fontSize: 12 }} formatter={(v) => <span className="text-muted-foreground">{v}</span>} />
       </PieChart>
     </ResponsiveContainer>
@@ -358,11 +498,9 @@ function CategoryBar({ data }) {
         <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" vertical={false} />
         <XAxis dataKey="name" tick={{ fill: 'hsl(var(--muted-foreground))', fontSize: 12 }} axisLine={false} tickLine={false} />
         <YAxis tick={{ fill: 'hsl(var(--muted-foreground))', fontSize: 12 }} axisLine={false} tickLine={false} />
-        <Tooltip
-          cursor={{ fill: 'hsl(var(--muted) / 0.4)' }}
+        <Tooltip cursor={{ fill: 'hsl(var(--muted) / 0.4)' }}
           contentStyle={{ background: 'hsl(var(--card))', border: '1px solid hsl(var(--border))', borderRadius: 8 }}
-          formatter={(v) => [`₹${formatINR(v)}`, 'Spent']}
-        />
+          formatter={(v) => [`₹${formatINR(v)}`, 'Spent']} />
         <Bar dataKey="value" radius={[8, 8, 0, 0]}>
           {data.map((d, i) => (<Cell key={i} fill={d.color} />))}
         </Bar>
@@ -379,10 +517,8 @@ function MonthlyLine({ data }) {
         <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" vertical={false} />
         <XAxis dataKey="month" tick={{ fill: 'hsl(var(--muted-foreground))', fontSize: 12 }} axisLine={false} tickLine={false} />
         <YAxis tick={{ fill: 'hsl(var(--muted-foreground))', fontSize: 12 }} axisLine={false} tickLine={false} />
-        <Tooltip
-          contentStyle={{ background: 'hsl(var(--card))', border: '1px solid hsl(var(--border))', borderRadius: 8 }}
-          formatter={(v) => [`₹${formatINR(v)}`, 'Total']}
-        />
+        <Tooltip contentStyle={{ background: 'hsl(var(--card))', border: '1px solid hsl(var(--border))', borderRadius: 8 }}
+          formatter={(v) => [`₹${formatINR(v)}`, 'Total']} />
         <Line type="monotone" dataKey="value" stroke="hsl(var(--primary))" strokeWidth={3}
           dot={{ r: 4, fill: 'hsl(var(--primary))' }} activeDot={{ r: 6 }} />
       </LineChart>
@@ -415,8 +551,7 @@ function ExpenseList({ expenses, onDelete, onEdit }) {
           const color = CATEGORIES[e.category]?.color || '#64748b'
           return (
             <div key={e.id} className="group flex items-center gap-3 p-3 rounded-xl border border-border/60 bg-card hover:bg-muted/40 transition-colors">
-              <div className="w-10 h-10 rounded-lg flex items-center justify-center shrink-0"
-                style={{ background: `${color}22`, color }}>
+              <div className="w-10 h-10 rounded-lg flex items-center justify-center shrink-0" style={{ background: `${color}22`, color }}>
                 <Store className="w-5 h-5" />
               </div>
               <div className="flex-1 min-w-0">
@@ -434,12 +569,8 @@ function ExpenseList({ expenses, onDelete, onEdit }) {
                 <div className="text-[10px] text-muted-foreground">{e.confidence}% conf</div>
               </div>
               <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
-                <Button size="icon" variant="ghost" onClick={() => onEdit(e)} title="Edit">
-                  <Pencil className="w-3.5 h-3.5" />
-                </Button>
-                <Button size="icon" variant="ghost" onClick={() => onDelete(e.id)} title="Delete">
-                  <Trash2 className="w-3.5 h-3.5 text-destructive" />
-                </Button>
+                <Button size="icon" variant="ghost" onClick={() => onEdit(e)} title="Edit"><Pencil className="w-3.5 h-3.5" /></Button>
+                <Button size="icon" variant="ghost" onClick={() => onDelete(e.id)} title="Delete"><Trash2 className="w-3.5 h-3.5 text-destructive" /></Button>
               </div>
             </div>
           )
@@ -493,35 +624,11 @@ function EditDialog({ open, onOpenChange, expense, onSave }) {
         </div>
         <DialogFooter>
           <Button variant="ghost" onClick={() => onOpenChange(false)}>Cancel</Button>
-          <Button onClick={() => { onSave({ ...form, amount: Number(form.amount) || 0 }); onOpenChange(false) }}>
-            Save
-          </Button>
+          <Button onClick={() => { onSave({ ...form, amount: Number(form.amount) || 0 }); onOpenChange(false) }}>Save</Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>
   )
-}
-
-function sampleSeed() {
-  const today = new Date()
-  const d = (back) => {
-    const x = new Date(today); x.setDate(x.getDate() - back)
-    return x.toISOString().slice(0, 10)
-  }
-  return [
-    { merchant: "Domino's Pizza", amount: 540, date: d(2), category: 'Food', confidence: 96 },
-    { merchant: 'Uber', amount: 280, date: d(3), category: 'Travel', confidence: 95 },
-    { merchant: 'Amazon', amount: 1499, date: d(5), category: 'Shopping', confidence: 94 },
-    { merchant: 'BookMyShow', amount: 600, date: d(7), category: 'Entertainment', confidence: 92 },
-    { merchant: 'Apollo Pharmacy', amount: 360, date: d(10), category: 'Health', confidence: 93 },
-    { merchant: 'Airtel', amount: 799, date: d(14), category: 'Utilities', confidence: 90 },
-    { merchant: 'Swiggy', amount: 420, date: d(18), category: 'Food', confidence: 91 },
-    { merchant: 'Ola', amount: 220, date: d(22), category: 'Travel', confidence: 88 },
-    { merchant: 'Netflix', amount: 199, date: d(28), category: 'Entertainment', confidence: 96 },
-    { merchant: 'Starbucks', amount: 480, date: d(35), category: 'Food', confidence: 90 },
-    { merchant: 'Flipkart', amount: 2199, date: d(42), category: 'Shopping', confidence: 92 },
-    { merchant: 'Jio', amount: 299, date: d(48), category: 'Utilities', confidence: 89 },
-  ].map((e) => ({ id: uuid(), ocrConfidence: 0, imageUrl: '', createdAt: new Date().toISOString(), ...e }))
 }
 
 function InsightsPanel({ insights }) {
@@ -530,22 +637,16 @@ function InsightsPanel({ insights }) {
     return (
       <Card className="border-border/60 bg-card/60 backdrop-blur">
         <CardHeader>
-          <CardTitle className="text-base flex items-center gap-2">
-            <Sparkles className="w-4 h-4 text-primary" /> Smart Insights
-          </CardTitle>
+          <CardTitle className="text-base flex items-center gap-2"><Sparkles className="w-4 h-4 text-primary" /> Smart Insights</CardTitle>
         </CardHeader>
-        <CardContent className="text-sm text-muted-foreground">
-          Add receipts to unlock personalized insights.
-        </CardContent>
+        <CardContent className="text-sm text-muted-foreground">Add receipts to unlock personalized insights.</CardContent>
       </Card>
     )
   }
   return (
     <Card className="border-border/60 bg-card/60 backdrop-blur">
       <CardHeader>
-        <CardTitle className="text-base flex items-center gap-2">
-          <Sparkles className="w-4 h-4 text-primary" /> Smart Insights
-        </CardTitle>
+        <CardTitle className="text-base flex items-center gap-2"><Sparkles className="w-4 h-4 text-primary" /> Smart Insights</CardTitle>
         <CardDescription>Auto-generated from your spending pattern</CardDescription>
       </CardHeader>
       <CardContent className="space-y-2">
@@ -568,45 +669,124 @@ function InsightsPanel({ insights }) {
   )
 }
 
-function App() {
+function sampleSeed() {
+  const today = new Date()
+  const d = (back) => { const x = new Date(today); x.setDate(x.getDate() - back); return x.toISOString().slice(0, 10) }
+  return [
+    { merchant: "Domino's Pizza", amount: 540, date: d(2), category: 'Food', confidence: 96 },
+    { merchant: 'Uber', amount: 280, date: d(3), category: 'Travel', confidence: 95 },
+    { merchant: 'Amazon', amount: 1499, date: d(5), category: 'Shopping', confidence: 94 },
+    { merchant: 'BookMyShow', amount: 600, date: d(7), category: 'Entertainment', confidence: 92 },
+    { merchant: 'Apollo Pharmacy', amount: 360, date: d(10), category: 'Health', confidence: 93 },
+    { merchant: 'Airtel', amount: 799, date: d(14), category: 'Utilities', confidence: 90 },
+    { merchant: 'Swiggy', amount: 420, date: d(18), category: 'Food', confidence: 91 },
+    { merchant: 'Ola', amount: 220, date: d(22), category: 'Travel', confidence: 88 },
+    { merchant: 'Netflix', amount: 199, date: d(28), category: 'Entertainment', confidence: 96 },
+    { merchant: 'Starbucks', amount: 480, date: d(35), category: 'Food', confidence: 90 },
+    { merchant: 'Flipkart', amount: 2199, date: d(42), category: 'Shopping', confidence: 92 },
+    { merchant: 'Jio', amount: 299, date: d(48), category: 'Utilities', confidence: 89 },
+  ].map((e) => ({ id: uuid(), ocrConfidence: 0, createdAt: new Date().toISOString(), ...e }))
+}
+
+// ===================== DASHBOARD =====================
+function Dashboard({ user, onLogout }) {
   const [expenses, setExpenses] = useState([])
-  const [loaded, setLoaded] = useState(false)
+  const [loading, setLoading] = useState(true)
   const [query, setQuery] = useState('')
   const [filterCat, setFilterCat] = useState('all')
   const [dateFrom, setDateFrom] = useState('')
   const [dateTo, setDateTo] = useState('')
   const [editing, setEditing] = useState(null)
+  const [importPrompt, setImportPrompt] = useState(false)
+  const [pendingImport, setPendingImport] = useState([])
 
-  useEffect(() => {
-    setExpenses(loadExpenses())
-    setLoaded(true)
+  const refresh = useCallback(async () => {
+    setLoading(true)
+    try {
+      const list = await api.listExpenses()
+      setExpenses(list)
+    } finally {
+      setLoading(false)
+    }
   }, [])
 
-  useEffect(() => {
-    if (loaded) saveExpenses(expenses)
-  }, [expenses, loaded])
+  useEffect(() => { refresh() }, [refresh])
 
-  const addExpense = (e) => setExpenses((prev) => [e, ...prev])
-  const deleteExpense = (id) => {
+  // Check for legacy localStorage data, offer one-time import
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem(LEGACY_KEY)
+      if (!raw) return
+      const arr = JSON.parse(raw)
+      if (Array.isArray(arr) && arr.length > 0) {
+        setPendingImport(arr)
+        setImportPrompt(true)
+      }
+    } catch (e) {}
+  }, [])
+
+  const doImport = async () => {
+    try {
+      const clean = pendingImport.map((e) => ({
+        id: e.id || uuid(),
+        merchant: e.merchant || 'Unknown',
+        amount: Number(e.amount) || 0,
+        date: e.date || new Date().toISOString().slice(0, 10),
+        category: e.category || 'Other',
+        confidence: Number(e.confidence) || 0,
+        ocrConfidence: Number(e.ocrConfidence) || 0,
+        createdAt: e.createdAt || new Date().toISOString(),
+      }))
+      const res = await api.bulkInsert(clean)
+      toast.success(`Imported ${res.inserted} expense(s) into your account`)
+      localStorage.removeItem(LEGACY_KEY)
+      setImportPrompt(false)
+      refresh()
+    } catch (e) {
+      toast.error('Import failed')
+    }
+  }
+  const dismissImport = () => {
+    localStorage.removeItem(LEGACY_KEY)
+    setImportPrompt(false)
+    setPendingImport([])
+  }
+
+  const addExpense = async (exp) => {
+    try {
+      const saved = await api.addExpense(exp)
+      if (saved) setExpenses((prev) => [saved, ...prev])
+      toast.success('Expense saved')
+    } catch (e) {
+      toast.error('Failed to save')
+    }
+  }
+  const deleteExpense = async (id) => {
     setExpenses((prev) => prev.filter((e) => e.id !== id))
+    try { await api.deleteExpense(id) } catch (e) {}
     toast.success('Expense deleted')
   }
-  const updateExpense = (next) => {
+  const updateExpense = async (next) => {
     setExpenses((prev) => prev.map((e) => (e.id === next.id ? next : e)))
+    try { await api.updateExpense(next) } catch (e) {}
     toast.success('Expense updated')
   }
-
-  const seed = () => {
-    setExpenses((prev) => [...sampleSeed(), ...prev])
-    toast.success('Loaded sample expenses')
-  }
-
-  const clearAll = () => {
-    if (!expenses.length) return
-    if (confirm('Delete all expenses? This cannot be undone.')) {
-      setExpenses([])
-      toast.success('All expenses cleared')
+  const seed = async () => {
+    try {
+      const list = sampleSeed()
+      await api.bulkInsert(list)
+      toast.success('Loaded sample expenses')
+      refresh()
+    } catch (e) {
+      toast.error('Failed to seed')
     }
+  }
+  const clearAll = async () => {
+    if (!expenses.length) return
+    if (!confirm('Delete all expenses? This cannot be undone.')) return
+    setExpenses([])
+    try { await api.clearAll() } catch (e) {}
+    toast.success('All expenses cleared')
   }
 
   const filtered = useMemo(() => {
@@ -630,47 +810,41 @@ function App() {
   }, [filtered])
   const topCategory = Object.entries(catTotals).sort((a, b) => b[1] - a[1])[0]?.[0] || '—'
 
-  const pieData = useMemo(() => {
-    return Object.entries(catTotals).map(([name, value]) => ({
-      name, value, color: CATEGORIES[name]?.color || '#64748b',
-    }))
-  }, [catTotals])
+  const pieData = useMemo(() => Object.entries(catTotals).map(([name, value]) => ({
+    name, value, color: CATEGORIES[name]?.color || '#64748b',
+  })), [catTotals])
   const barData = pieData
-
   const monthlyData = useMemo(() => {
     const m = {}
     for (const e of filtered) {
-      const ym = (e.date || '').slice(0, 7)
-      if (!ym) continue
+      const ym = (e.date || '').slice(0, 7); if (!ym) continue
       m[ym] = (m[ym] || 0) + Number(e.amount || 0)
     }
     return Object.keys(m).sort().map((k) => ({ month: k, value: m[k] }))
   }, [filtered])
-
   const insights = useMemo(() => generateInsights(filtered), [filtered])
 
   const exportCSV = () => {
-    if (!filtered.length) {
-      toast.error('Nothing to export')
-      return
-    }
+    if (!filtered.length) { toast.error('Nothing to export'); return }
     const headers = ['id', 'merchant', 'amount', 'date', 'category', 'confidence']
     const rows = filtered.map((e) => headers.map((h) => JSON.stringify(e[h] ?? '')).join(','))
     const csv = [headers.join(','), ...rows].join('\n')
     const blob = new Blob([csv], { type: 'text/csv' })
     const url = URL.createObjectURL(blob)
     const a = document.createElement('a')
-    a.href = url
-    a.download = `expenses_${Date.now()}.csv`
-    a.click()
+    a.href = url; a.download = `expenses_${Date.now()}.csv`; a.click()
     URL.revokeObjectURL(url)
     toast.success('Exported CSV')
   }
 
+  const handleLogout = async () => {
+    await api.logout()
+    onLogout()
+    toast.success('Signed out')
+  }
+
   return (
     <div className="min-h-screen bg-gradient-to-br from-background via-background to-muted/30 text-foreground">
-      <Toaster richColors theme="dark" position="top-right" />
-
       <div className="pointer-events-none fixed inset-0 overflow-hidden -z-10">
         <div className="absolute -top-32 -left-32 w-[420px] h-[420px] rounded-full bg-primary/15 blur-3xl" />
         <div className="absolute top-1/3 -right-32 w-[420px] h-[420px] rounded-full bg-fuchsia-500/10 blur-3xl" />
@@ -685,21 +859,36 @@ function App() {
             </div>
             <div>
               <div className="font-semibold tracking-tight">Smart Expense Categorizer</div>
-              <div className="text-xs text-muted-foreground">Snap. Analyze. Save.</div>
+              <div className="text-xs text-muted-foreground">Hi, {user?.name || user?.email}</div>
             </div>
           </div>
           <div className="flex items-center gap-2">
-            <Button variant="outline" size="sm" onClick={seed} className="gap-1 hidden sm:inline-flex">
-              <Plus className="w-4 h-4" /> Sample data
-            </Button>
-            <Button variant="outline" size="sm" onClick={exportCSV} className="gap-1">
-              <Download className="w-4 h-4" /> Export
-            </Button>
+            <Button variant="outline" size="sm" onClick={seed} className="gap-1 hidden sm:inline-flex"><Plus className="w-4 h-4" /> Sample data</Button>
+            <Button variant="outline" size="sm" onClick={exportCSV} className="gap-1"><Download className="w-4 h-4" /> Export</Button>
+            <Button variant="ghost" size="sm" onClick={handleLogout} className="gap-1" title="Sign out"><LogOut className="w-4 h-4" /></Button>
           </div>
         </div>
       </header>
 
       <main className="container py-6 space-y-6">
+        {importPrompt && (
+          <Card className="border-primary/40 bg-primary/5">
+            <CardContent className="p-4 flex flex-col md:flex-row md:items-center md:justify-between gap-3">
+              <div className="flex items-start gap-3">
+                <div className="w-9 h-9 rounded-lg bg-primary/15 flex items-center justify-center"><Database className="w-4 h-4 text-primary" /></div>
+                <div>
+                  <div className="text-sm font-medium">Import {pendingImport.length} expense(s) from this device?</div>
+                  <div className="text-xs text-muted-foreground">We found receipts saved in this browser before you signed in. Add them to your account?</div>
+                </div>
+              </div>
+              <div className="flex gap-2 shrink-0">
+                <Button variant="ghost" size="sm" onClick={dismissImport}>Dismiss</Button>
+                <Button size="sm" onClick={doImport} className="gap-1"><ArrowRight className="w-4 h-4" /> Import</Button>
+              </div>
+            </CardContent>
+          </Card>
+        )}
+
         <section className="grid lg:grid-cols-3 gap-4">
           <div className="lg:col-span-2 space-y-4">
             <div className="relative overflow-hidden rounded-2xl border border-border/60 bg-gradient-to-br from-primary/10 via-card to-card p-6">
@@ -707,13 +896,11 @@ function App() {
               <h1 className="text-3xl md:text-4xl font-semibold tracking-tight">
                 Turn paper receipts into <span className="bg-gradient-to-r from-primary to-fuchsia-400 bg-clip-text text-transparent">clean insights</span>.
               </h1>
-              <p className="text-muted-foreground mt-2 max-w-xl">
-                Upload a receipt, our on-device OCR reads merchant, amount and date &mdash; then auto-tags it into the right category.
-              </p>
+              <p className="text-muted-foreground mt-2 max-w-xl">Upload a receipt, our on-device OCR reads merchant, amount and date &mdash; then auto-tags it into the right category.</p>
               <div className="flex flex-wrap gap-2 mt-4">
-                <div className="text-xs px-2.5 py-1 rounded-full bg-muted/60 border border-border">100% on-device OCR</div>
-                <div className="text-xs px-2.5 py-1 rounded-full bg-muted/60 border border-border">No login required</div>
-                <div className="text-xs px-2.5 py-1 rounded-full bg-muted/60 border border-border">Local-first storage</div>
+                <div className="text-xs px-2.5 py-1 rounded-full bg-muted/60 border border-border">On-device OCR</div>
+                <div className="text-xs px-2.5 py-1 rounded-full bg-muted/60 border border-border">Cloud-synced</div>
+                <div className="text-xs px-2.5 py-1 rounded-full bg-muted/60 border border-border">Private to your account</div>
               </div>
             </div>
 
@@ -766,41 +953,29 @@ function App() {
             </div>
           </div>
           <div className="flex gap-2">
-            <Button variant="outline" onClick={() => { setQuery(''); setFilterCat('all'); setDateFrom(''); setDateTo('') }}>
-              Reset
-            </Button>
-            <Button variant="destructive" onClick={clearAll} className="gap-1">
-              <Trash2 className="w-4 h-4" /> Clear all
-            </Button>
+            <Button variant="outline" onClick={() => { setQuery(''); setFilterCat('all'); setDateFrom(''); setDateTo('') }}>Reset</Button>
+            <Button variant="destructive" onClick={clearAll} className="gap-1"><Trash2 className="w-4 h-4" /> Clear all</Button>
           </div>
         </section>
 
         <section className="grid lg:grid-cols-3 gap-4">
           <Card className="lg:col-span-1 border-border/60 bg-card/60 backdrop-blur">
             <CardHeader>
-              <CardTitle className="text-base flex items-center gap-2">
-                <PieIcon className="w-4 h-4 text-primary" /> Distribution
-              </CardTitle>
+              <CardTitle className="text-base flex items-center gap-2"><PieIcon className="w-4 h-4 text-primary" /> Distribution</CardTitle>
               <CardDescription>How your money splits by category</CardDescription>
             </CardHeader>
             <CardContent><CategoryPie data={pieData} /></CardContent>
           </Card>
-
           <Card className="lg:col-span-2 border-border/60 bg-card/60 backdrop-blur">
             <CardHeader>
-              <CardTitle className="text-base flex items-center gap-2">
-                <BarChart3 className="w-4 h-4 text-primary" /> Category spending
-              </CardTitle>
+              <CardTitle className="text-base flex items-center gap-2"><BarChart3 className="w-4 h-4 text-primary" /> Category spending</CardTitle>
               <CardDescription>Top spend buckets</CardDescription>
             </CardHeader>
             <CardContent><CategoryBar data={barData} /></CardContent>
           </Card>
-
           <Card className="lg:col-span-3 border-border/60 bg-card/60 backdrop-blur">
             <CardHeader>
-              <CardTitle className="text-base flex items-center gap-2">
-                <TrendingUp className="w-4 h-4 text-primary" /> Monthly trend
-              </CardTitle>
+              <CardTitle className="text-base flex items-center gap-2"><TrendingUp className="w-4 h-4 text-primary" /> Monthly trend</CardTitle>
               <CardDescription>Total spend per month</CardDescription>
             </CardHeader>
             <CardContent><MonthlyLine data={monthlyData} /></CardContent>
@@ -811,10 +986,8 @@ function App() {
           <Card className="border-border/60 bg-card/60 backdrop-blur">
             <CardHeader className="flex flex-row items-center justify-between space-y-0">
               <div>
-                <CardTitle className="text-base flex items-center gap-2">
-                  <Receipt className="w-4 h-4 text-primary" /> Expenses
-                </CardTitle>
-                <CardDescription>{filtered.length} record(s) shown</CardDescription>
+                <CardTitle className="text-base flex items-center gap-2"><Receipt className="w-4 h-4 text-primary" /> Expenses</CardTitle>
+                <CardDescription>{loading ? 'Loading...' : `${filtered.length} record(s) shown`}</CardDescription>
               </div>
             </CardHeader>
             <CardContent>
@@ -823,18 +996,47 @@ function App() {
           </Card>
         </section>
 
-        <footer className="text-xs text-muted-foreground text-center py-6">
-          Built with Tesseract.js &bull; Recharts &bull; shadcn/ui
-        </footer>
+        <footer className="text-xs text-muted-foreground text-center py-6">Built with Tesseract.js &bull; Recharts &bull; shadcn/ui</footer>
       </main>
 
-      <EditDialog
-        open={!!editing}
-        onOpenChange={(o) => !o && setEditing(null)}
-        expense={editing}
-        onSave={updateExpense}
-      />
+      <EditDialog open={!!editing} onOpenChange={(o) => !o && setEditing(null)} expense={editing} onSave={updateExpense} />
     </div>
+  )
+}
+
+// ===================== ROOT =====================
+function App() {
+  const [user, setUser] = useState(null)
+  const [bootstrapping, setBootstrapping] = useState(true)
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const j = await api.me()
+        setUser(j.user || null)
+      } finally {
+        setBootstrapping(false)
+      }
+    })()
+  }, [])
+
+  if (bootstrapping) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-background text-foreground">
+        <Loader2 className="w-6 h-6 animate-spin text-primary" />
+      </div>
+    )
+  }
+
+  return (
+    <>
+      <Toaster richColors theme="dark" position="top-right" />
+      {!user ? (
+        <AuthScreen onAuthed={setUser} />
+      ) : (
+        <Dashboard user={user} onLogout={() => setUser(null)} />
+      )}
+    </>
   )
 }
 
