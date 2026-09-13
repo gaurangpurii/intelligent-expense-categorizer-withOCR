@@ -1,4 +1,4 @@
-# Smart Expense Categorizer
+# Smart Expense Categorizer using ocr
 
 A modern, production-style fintech web app that turns paper receipts into a clean spending dashboard — entirely on-device.
 
