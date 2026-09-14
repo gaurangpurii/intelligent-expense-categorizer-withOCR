@@ -44,7 +44,7 @@ lib/
     categorize.js    # category rules, parser, insight generator
 components/ui/       # shadcn/ui
 ```
-
+.
 ## Categorization rules
 
 Defined in `lib/utils/categorize.js` — extend the `CATEGORIES` map with more keywords as needed. Priority: merchant-name match → keyword match → `Other`.
