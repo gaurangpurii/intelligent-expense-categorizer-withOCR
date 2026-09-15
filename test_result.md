@@ -21,7 +21,7 @@
 ##     working: true  # or false or "NA"
 ##     file: "file_path.py"
 ##     stuck_count: 0
-##     priority: "high"  # or "medium" or "low"
+##     priority: "high"  # or "medium" or "low" 
 ##     needs_retesting: false
 ##     status_history:
 ##         -working: true  # or false or "NA"
