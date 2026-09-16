@@ -3,7 +3,7 @@
 A modern, production-style fintech web app that turns paper receipts into a clean spending dashboard — entirely on-device.
 
 ## What it does
-
+ 
 1. **Drag & drop a receipt** (JPG / JPEG / PNG)
 2. **OCR on-device** with Tesseract.js extracts the raw text + confidence score
 3. **Smart parser** auto-detects merchant, amount and date
