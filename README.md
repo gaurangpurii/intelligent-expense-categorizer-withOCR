@@ -6,7 +6,7 @@ A modern, production-style fintech web app that turns paper receipts into a clea
  
 1. **Drag & drop a receipt** (JPG / JPEG / PNG)
 2. **OCR on-device** with Tesseract.js extracts the raw text + confidence score
-3. **Smart parser** auto-detects merchant, amount and date         
+3. **Smart parser** auto-detects merchant, amount and date            
 4. **Categorization engine** (`lib/utils/categorize.js`) tags it as Food / Travel / Shopping / Entertainment / Health / Utilities / Other
 5. **Local-first storage** — every expense is persisted to `localStorage`
 6. **Analytics dashboard** with KPIs, pie / bar / line charts and auto-generated insights
