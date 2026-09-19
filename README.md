@@ -28,7 +28,7 @@ No login. No API key. No backend. 100% browser-side.
 ```bash
 yarn install
 yarn dev
-```
+``` 
 
 Open http://localhost:3000
 
