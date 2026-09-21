@@ -4,7 +4,7 @@ Backend API tests for Smart Expense Categorizer
 Tests auth endpoints and expense CRUD with multi-user isolation
 """
 import requests
-import uuid
+import uuid 
 import json
 from datetime import datetime
 
